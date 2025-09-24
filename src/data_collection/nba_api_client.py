@@ -13,7 +13,7 @@ Key features:
 
 from nba_api.stats.endpoints import (
     leagueleaders, 
-    teamstats, 
+    leaguedashteamstats, 
     playercareerstats,
     playerindex,
     leaguestandings,
@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 class NBAApiClient:
     """Client for NBA.com APIs"""
     
-    def __init__(self, delay_seconds: float = 2.0):
+    def __init__(self, delay_seconds: float = 1.0):
         """
         Initialize the NBA API client
         
@@ -144,7 +144,7 @@ class NBAApiClient:
             self._wait_between_calls()
             
             # Get team stats
-            stats = teamstats.TeamStats(season=season)
+            stats = leaguedashteamstats.LeagueDashTeamStats(season=season)
             df = stats.get_data_frames()[0]
             
             # Convert to list of dictionaries and add metadata
@@ -307,8 +307,12 @@ def main():
         
         # Convert to DataFrame for easy analysis
         df = pd.DataFrame(player_stats)
+        # Print what columns we have for debugging purposes
+        print("Available columns:", df.columns.tolist())
+        print("First few rows:")
+        print(df.head())
         print("\nTop 10 scorers:")
-        top_scorers = df.nlargest(10, 'PTS')[['PLAYER', 'TEAM_ABBREVIATION', 'PTS']]
+        top_scorers = df.nlargest(10, 'PTS')[['PLAYER', 'TEAM', 'PTS']]
         print(top_scorers.to_string(index=False))
     
     print("\n3. Getting team standings...")
