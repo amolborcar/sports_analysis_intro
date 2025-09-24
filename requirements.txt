@@ -13,6 +13,8 @@ sqlalchemy>=2.0.0
 black>=23.0.0
 flake8>=6.0.0
 pytest>=7.0.0
+pytest-mock>=3.10.0
+pytest-cov>=4.0.0
 
 # Jupyter (for analysis)
 jupyter>=1.0.0

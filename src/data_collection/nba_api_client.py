@@ -28,6 +28,8 @@ from typing import Dict, List, Optional
 import time
 import requests
 from functools import wraps
+import threading
+import signal
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -55,7 +57,7 @@ class NBAApiClient:
     
     def _safe_api_call(self, api_call_func, *args, **kwargs):
         """
-        Execute NBA API calls with timeout handling
+        Execute NBA API calls with timeout handling using threading
         
         Args:
             api_call_func: The NBA API function to call
@@ -64,45 +66,65 @@ class NBAApiClient:
         Returns:
             API response object or None if failed
         """
-        try:
-            logger.info(f"Making API call: {api_call_func.__name__}")
-            self._wait_between_calls()
-            
-            # Monkey patch requests to add timeout
-            original_get = requests.get
-            original_post = requests.post
-            
-            def get_with_timeout(*args, **kwargs):
-                kwargs.setdefault('timeout', self.timeout_seconds)
-                return original_get(*args, **kwargs)
-            
-            def post_with_timeout(*args, **kwargs):
-                kwargs.setdefault('timeout', self.timeout_seconds)
-                return original_post(*args, **kwargs)
-            
-            # Apply the patch
-            requests.get = get_with_timeout
-            requests.post = post_with_timeout
-            
+        func_name = getattr(api_call_func, '__name__', str(api_call_func))
+        logger.info(f"Making API call: {func_name}")
+        self._wait_between_calls()
+        
+        # Use threading for robust timeout
+        result = [None]  # Mutable container for thread result
+        exception = [None]  # Container for any exception
+        
+        def target():
             try:
-                # Make the API call
-                result = api_call_func(*args, **kwargs)
-                logger.info(f"API call successful: {api_call_func.__name__}")
-                return result
-            finally:
-                # Restore original functions
-                requests.get = original_get
-                requests.post = original_post
+                # Monkey patch requests to add timeout
+                original_get = requests.get
+                original_post = requests.post
                 
-        except requests.exceptions.Timeout:
-            logger.error(f"API call timed out after {self.timeout_seconds}s: {api_call_func.__name__}")
+                def get_with_timeout(*args, **kwargs):
+                    kwargs.setdefault('timeout', self.timeout_seconds)
+                    return original_get(*args, **kwargs)
+                
+                def post_with_timeout(*args, **kwargs):
+                    kwargs.setdefault('timeout', self.timeout_seconds)
+                    return original_post(*args, **kwargs)
+                
+                # Apply the patch
+                requests.get = get_with_timeout
+                requests.post = post_with_timeout
+                
+                try:
+                    # Make the API call
+                    result[0] = api_call_func(*args, **kwargs)
+                finally:
+                    # Restore original functions
+                    requests.get = original_get
+                    requests.post = original_post
+                    
+            except Exception as e:
+                exception[0] = e
+        
+        # Run the API call in a separate thread
+        thread = threading.Thread(target=target)
+        thread.daemon = True  # Dies with main thread
+        thread.start()
+        thread.join(timeout=self.timeout_seconds)
+        
+        if thread.is_alive():
+            # Thread is still running - timeout occurred
+            logger.error(f"API call timed out after {self.timeout_seconds}s: {func_name}")
             return None
-        except requests.exceptions.ConnectionError:
-            logger.error(f"Connection error in API call: {api_call_func.__name__}")
+        
+        if exception[0]:
+            if isinstance(exception[0], requests.exceptions.Timeout):
+                logger.error(f"Network timeout in API call: {func_name}")
+            elif isinstance(exception[0], requests.exceptions.ConnectionError):
+                logger.error(f"Connection error in API call: {func_name}")
+            else:
+                logger.error(f"Error in API call {func_name}: {exception[0]}")
             return None
-        except Exception as e:
-            logger.error(f"Unexpected error in API call {api_call_func.__name__}: {e}")
-            return None
+        
+        logger.info(f"API call successful: {func_name}")
+        return result[0]
     
     def get_all_players(self) -> List[Dict]:
         """
