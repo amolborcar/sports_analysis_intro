@@ -26,6 +26,8 @@ import logging
 from datetime import datetime, date
 from typing import Dict, List, Optional
 import time
+import requests
+from functools import wraps
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -35,19 +37,72 @@ logger = logging.getLogger(__name__)
 class NBAApiClient:
     """Client for NBA.com APIs"""
     
-    def __init__(self, delay_seconds: float = 1.0):
+    def __init__(self, delay_seconds: float = 1.0, timeout_seconds: float = 30.0):
         """
         Initialize the NBA API client
         
         Args:
             delay_seconds: Delay between API calls to be respectful
+            timeout_seconds: Timeout for API requests to prevent hanging
         """
         self.delay_seconds = delay_seconds
-        logger.info("NBA API Client initialized")
+        self.timeout_seconds = timeout_seconds
+        logger.info(f"NBA API Client initialized (delay: {delay_seconds}s, timeout: {timeout_seconds}s)")
     
     def _wait_between_calls(self):
         """Add delay between API calls"""
         time.sleep(self.delay_seconds)
+    
+    def _safe_api_call(self, api_call_func, *args, **kwargs):
+        """
+        Execute NBA API calls with timeout handling
+        
+        Args:
+            api_call_func: The NBA API function to call
+            *args, **kwargs: Arguments to pass to the API function
+            
+        Returns:
+            API response object or None if failed
+        """
+        try:
+            logger.info(f"Making API call: {api_call_func.__name__}")
+            self._wait_between_calls()
+            
+            # Monkey patch requests to add timeout
+            original_get = requests.get
+            original_post = requests.post
+            
+            def get_with_timeout(*args, **kwargs):
+                kwargs.setdefault('timeout', self.timeout_seconds)
+                return original_get(*args, **kwargs)
+            
+            def post_with_timeout(*args, **kwargs):
+                kwargs.setdefault('timeout', self.timeout_seconds)
+                return original_post(*args, **kwargs)
+            
+            # Apply the patch
+            requests.get = get_with_timeout
+            requests.post = post_with_timeout
+            
+            try:
+                # Make the API call
+                result = api_call_func(*args, **kwargs)
+                logger.info(f"API call successful: {api_call_func.__name__}")
+                return result
+            finally:
+                # Restore original functions
+                requests.get = original_get
+                requests.post = original_post
+                
+        except requests.exceptions.Timeout:
+            logger.error(f"API call timed out after {self.timeout_seconds}s: {api_call_func.__name__}")
+            return None
+        except requests.exceptions.ConnectionError:
+            logger.error(f"Connection error in API call: {api_call_func.__name__}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error in API call {api_call_func.__name__}: {e}")
+            return None
     
     def get_all_players(self) -> List[Dict]:
         """
@@ -103,16 +158,20 @@ class NBAApiClient:
         Returns:
             List of player stat dictionaries
         """
+        logger.info(f"Fetching player stats for {season} season...")
+        
+        # Use safe API call with timeout handling
+        stats = self._safe_api_call(
+            leagueleaders.LeagueLeaders,
+            season=season,
+            season_type_all_star='Regular Season'
+        )
+        
+        if stats is None:
+            logger.error(f"Failed to fetch player stats for {season}")
+            return []
+        
         try:
-            logger.info(f"Fetching player stats for {season} season...")
-            self._wait_between_calls()
-            
-            # Get league leaders (this gives us per game stats for all players)
-            stats = leagueleaders.LeagueLeaders(
-                season=season,
-                season_type_all_star='Regular Season'
-            )
-            
             df = stats.get_data_frames()[0]
             
             # Convert to list of dictionaries and add metadata
@@ -126,7 +185,7 @@ class NBAApiClient:
             return players_stats
             
         except Exception as e:
-            logger.error(f"Error fetching player stats for {season}: {e}")
+            logger.error(f"Error processing player stats for {season}: {e}")
             return []
     
     def get_team_stats(self, season: str = "2023-24") -> List[Dict]:
