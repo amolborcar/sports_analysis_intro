@@ -22,19 +22,21 @@ class TestNBAApiClient:
 
     def setup_method(self):
         """Set up test fixtures before each test method"""
-        self.client = NBAApiClient(delay_seconds=0.1, timeout_seconds=2.0)
+        self.client = NBAApiClient(delay_seconds=0.1, timeout_seconds=2.0, max_retries=2)
 
     def test_init_default_values(self):
         """Test client initialization with default values"""
         client = NBAApiClient()
         assert client.delay_seconds == 1.0
         assert client.timeout_seconds == 30.0
+        assert client.max_retries == 3
 
     def test_init_custom_values(self):
         """Test client initialization with custom values"""
-        client = NBAApiClient(delay_seconds=0.5, timeout_seconds=10.0)
+        client = NBAApiClient(delay_seconds=0.5, timeout_seconds=10.0, max_retries=1)
         assert client.delay_seconds == 0.5
         assert client.timeout_seconds == 10.0
+        assert client.max_retries == 1
 
     def test_timeout_handling_slow_function(self):
         """Test that timeout handling works for slow operations"""
@@ -182,6 +184,53 @@ class TestNBAApiClient:
         assert hasattr(client, 'get_player_season_stats')
         assert hasattr(client, '_safe_api_call')
         assert hasattr(client, '_wait_between_calls')
+
+    def test_retry_logic_eventual_success(self):
+        """Test that retry logic eventually succeeds after failures"""
+        attempt_count = [0]  # Mutable counter
+        
+        def flaky_function():
+            attempt_count[0] += 1
+            if attempt_count[0] < 3:  # Fail first 2 attempts
+                raise requests.exceptions.ConnectionError("Network error")
+            return "Success on attempt 3"
+        
+        start_time = time.time()
+        result = self.client._safe_api_call(flaky_function)
+        end_time = time.time()
+        
+        assert result == "Success on attempt 3"
+        assert attempt_count[0] == 3  # Should have tried 3 times
+        # Should take roughly: 0 + 1 + 2 = 3 seconds for backoff delays
+        assert 2.5 <= (end_time - start_time) <= 4.0
+
+    def test_retry_logic_all_attempts_fail(self):
+        """Test that retry logic gives up after max attempts"""
+        attempt_count = [0]
+        
+        def always_failing_function():
+            attempt_count[0] += 1
+            raise requests.exceptions.ConnectionError("Always fails")
+        
+        result = self.client._safe_api_call(always_failing_function)
+        
+        assert result is None
+        assert attempt_count[0] == self.client.max_retries + 1  # 3 total attempts (0, 1, 2)
+
+    def test_retry_logic_no_retry_on_timeout(self):
+        """Test that timeouts are retried like other failures"""
+        def timeout_function():
+            time.sleep(3)  # Longer than timeout
+            return "Should not reach"
+        
+        start_time = time.time()
+        result = self.client._safe_api_call(timeout_function)
+        end_time = time.time()
+        
+        assert result is None
+        # Should retry: first timeout (~2s) + 1s delay + second timeout (~2s) + 2s delay + third timeout (~2s)
+        # Total: roughly 2 + 1 + 2 + 2 + 2 = 9 seconds
+        assert 8.0 <= (end_time - start_time) <= 12.0
 
 
 class TestNBAApiClientEdgeCases:

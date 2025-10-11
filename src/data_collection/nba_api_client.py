@@ -39,23 +39,25 @@ logger = logging.getLogger(__name__)
 class NBAApiClient:
     """Client for NBA.com APIs"""
     
-    def __init__(self, delay_seconds: float = 1.0, timeout_seconds: float = 30.0):
+    def __init__(self, delay_seconds: float = 1.0, timeout_seconds: float = 30.0, max_retries: int = 3):
         """
         Initialize the NBA API client
         
         Args:
             delay_seconds: Delay between API calls to be respectful
             timeout_seconds: Timeout for API requests to prevent hanging
+            max_retries: Maximum number of retry attempts for failed requests
         """
         self.delay_seconds = delay_seconds
         self.timeout_seconds = timeout_seconds
-        logger.info(f"NBA API Client initialized (delay: {delay_seconds}s, timeout: {timeout_seconds}s)")
+        self.max_retries = max_retries
+        logger.info(f"NBA API Client initialized (delay: {delay_seconds}s, timeout: {timeout_seconds}s, retries: {max_retries})")
     
     def _wait_between_calls(self):
         """Add delay between API calls"""
         time.sleep(self.delay_seconds)
     
-    def _safe_api_call(self, api_call_func, *args, **kwargs):
+    def _safe_api_call_single_attempt(self, api_call_func, *args, **kwargs):
         """
         Execute NBA API calls with timeout handling using threading
         
@@ -125,6 +127,48 @@ class NBAApiClient:
         
         logger.info(f"API call successful: {func_name}")
         return result[0]
+    
+    def _safe_api_call(self, api_call_func, *args, **kwargs):
+        """
+        Execute NBA API calls with timeout handling and retry logic
+        
+        Args:
+            api_call_func: The NBA API function to call
+            *args, **kwargs: Arguments to pass to the API function
+            
+        Returns:
+            API response object or None if all attempts failed
+        """
+        func_name = getattr(api_call_func, '__name__', str(api_call_func))
+        
+        for attempt in range(self.max_retries + 1):  # +1 because we count from 0
+            if attempt > 0:
+                # Calculate exponential backoff delay: 2^(attempt-1) seconds
+                backoff_delay = 2 ** (attempt - 1)
+                logger.info(f"Retrying {func_name} in {backoff_delay}s (attempt {attempt + 1}/{self.max_retries + 1})")
+                time.sleep(backoff_delay)
+            
+            try:
+                result = self._safe_api_call_single_attempt(api_call_func, *args, **kwargs)
+                
+                if result is not None:
+                    if attempt > 0:
+                        logger.info(f"API call succeeded on attempt {attempt + 1}: {func_name}")
+                    return result
+                else:
+                    # Timeout or error occurred
+                    if attempt < self.max_retries:
+                        logger.warning(f"API call failed (attempt {attempt + 1}/{self.max_retries + 1}): {func_name}")
+                    else:
+                        logger.error(f"API call failed after {self.max_retries + 1} attempts: {func_name}")
+                        
+            except Exception as e:
+                if attempt < self.max_retries:
+                    logger.warning(f"Unexpected error on attempt {attempt + 1}: {e}")
+                else:
+                    logger.error(f"API call failed after {self.max_retries + 1} attempts with error: {e}")
+        
+        return None
     
     def get_all_players(self) -> List[Dict]:
         """
