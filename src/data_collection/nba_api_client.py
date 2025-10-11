@@ -30,6 +30,7 @@ import requests
 from functools import wraps
 import threading
 import signal
+from .response_validator import validate_nba_response, ValidationSeverity
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -39,7 +40,8 @@ logger = logging.getLogger(__name__)
 class NBAApiClient:
     """Client for NBA.com APIs"""
     
-    def __init__(self, delay_seconds: float = 1.0, timeout_seconds: float = 30.0, max_retries: int = 3):
+    def __init__(self, delay_seconds: float = 1.0, timeout_seconds: float = 30.0, max_retries: int = 3, 
+                 enable_validation: bool = True, strict_validation: bool = False):
         """
         Initialize the NBA API client
         
@@ -47,11 +49,16 @@ class NBAApiClient:
             delay_seconds: Delay between API calls to be respectful
             timeout_seconds: Timeout for API requests to prevent hanging
             max_retries: Maximum number of retry attempts for failed requests
+            enable_validation: Whether to validate API responses
+            strict_validation: Whether to treat validation warnings as errors
         """
         self.delay_seconds = delay_seconds
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
-        logger.info(f"NBA API Client initialized (delay: {delay_seconds}s, timeout: {timeout_seconds}s, retries: {max_retries})")
+        self.enable_validation = enable_validation
+        self.strict_validation = strict_validation
+        logger.info(f"NBA API Client initialized (delay: {delay_seconds}s, timeout: {timeout_seconds}s, "
+                   f"retries: {max_retries}, validation: {enable_validation}, strict: {strict_validation})")
     
     def _wait_between_calls(self):
         """Add delay between API calls"""
@@ -170,6 +177,56 @@ class NBAApiClient:
         
         return None
     
+    def _validate_response_data(self, data: List[Dict], endpoint_type: str) -> bool:
+        """
+        Validate response data quality and structure
+        
+        Args:
+            data: Response data to validate
+            endpoint_type: Type of endpoint for validation schema selection
+            
+        Returns:
+            True if data passes validation, False otherwise
+        """
+        if not self.enable_validation:
+            return True
+        
+        if not data:
+            logger.warning(f"Empty response data for {endpoint_type}")
+            return True  # Empty data is valid, just a warning
+        
+        try:
+            validation_result = validate_nba_response(data, endpoint_type, self.strict_validation)
+            
+            # Log validation summary
+            logger.info(f"Validation result for {endpoint_type}: {validation_result.get_summary()}")
+            
+            # Log detailed issues if any
+            if validation_result.issues:
+                for issue in validation_result.issues:
+                    log_level = logging.ERROR if issue.severity == ValidationSeverity.ERROR else logging.WARNING
+                    logger.log(log_level, f"Validation {issue.severity.value}: {issue.field} - {issue.message}")
+                    
+                    # Log sample values for debugging
+                    if issue.sample_values:
+                        logger.debug(f"Sample problematic values for {issue.field}: {issue.sample_values}")
+            
+            # Return validation result
+            if not validation_result.is_valid:
+                logger.error(f"Response validation failed for {endpoint_type}")
+                return False
+            
+            # Log data quality score
+            if validation_result.data_quality_score < 90:
+                logger.warning(f"Data quality score below 90%: {validation_result.data_quality_score:.1f}%")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error during response validation for {endpoint_type}: {e}")
+            # In case of validation error, return True to not block the data (fail-open approach)
+            return True
+    
     def get_all_players(self) -> List[Dict]:
         """
         Get all NBA players from the static data
@@ -184,6 +241,12 @@ class NBAApiClient:
             # Add timestamp
             for player in all_players:
                 player['retrieved_at'] = datetime.now()
+            
+            # Validate response data
+            if not self._validate_response_data(all_players, 'players'):
+                logger.error("Player data failed validation")
+                if self.strict_validation:
+                    return []
             
             logger.info(f"Retrieved {len(all_players)} players")
             return all_players
@@ -206,6 +269,12 @@ class NBAApiClient:
             # Add timestamp
             for team in all_teams:
                 team['retrieved_at'] = datetime.now()
+            
+            # Validate response data
+            if not self._validate_response_data(all_teams, 'teams'):
+                logger.error("Team data failed validation")
+                if self.strict_validation:
+                    return []
             
             logger.info(f"Retrieved {len(all_teams)} teams")
             return all_teams
@@ -246,6 +315,12 @@ class NBAApiClient:
             for player_stat in players_stats:
                 player_stat['season'] = season
                 player_stat['retrieved_at'] = datetime.now()
+            
+            # Validate response data
+            if not self._validate_response_data(players_stats, 'player_stats'):
+                logger.error(f"Player stats data failed validation for {season}")
+                if self.strict_validation:
+                    return []
             
             logger.info(f"Retrieved stats for {len(players_stats)} players")
             return players_stats
@@ -309,6 +384,12 @@ class NBAApiClient:
             for standing in standings_data:
                 standing['season'] = season
                 standing['retrieved_at'] = datetime.now()
+            
+            # Validate response data
+            if not self._validate_response_data(standings_data, 'standings'):
+                logger.error(f"Standings data failed validation for {season}")
+                if self.strict_validation:
+                    return []
             
             logger.info(f"Retrieved standings for {len(standings_data)} teams")
             return standings_data
@@ -377,6 +458,12 @@ class NBAApiClient:
             for game in games_data:
                 game['game_date'] = game_date
                 game['retrieved_at'] = datetime.now()
+            
+            # Validate response data
+            if not self._validate_response_data(games_data, 'games'):
+                logger.error(f"Games data failed validation for {game_date}")
+                if self.strict_validation:
+                    return []
             
             logger.info(f"Retrieved {len(games_data)} games for {game_date}")
             return games_data
